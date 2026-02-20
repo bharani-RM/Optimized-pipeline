@@ -1,0 +1,89 @@
+name: Optimized CI/CD
+
+on:
+  push:
+    branches: ["main"]
+
+env:
+  IMAGE_NAME: optimized-html
+
+jobs:
+
+# --------------------------
+# Parallel jobs
+# --------------------------
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Testing..."
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Linting..."
+
+# --------------------------
+# Build with Docker caching
+# --------------------------
+
+  build:
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Restore Docker cache
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASS }}
+
+      - name: Build & push image
+        run: |
+          docker buildx build \
+            --cache-from=type=local,src=/tmp/.buildx-cache \
+            --cache-to=type=local,dest=/tmp/.buildx-cache-new \
+            -t ${{ secrets.DOCKER_USER }}/${{ env.IMAGE_NAME }} \
+            --push .
+
+      - name: Update cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+# --------------------------
+# Automated EC2 deploy
+# --------------------------
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_KEY }}
+          script: |
+            sudo docker pull ${{ secrets.DOCKER_USER }}/${{ env.IMAGE_NAME }}
+            sudo docker stop web || true
+            sudo docker rm web || true
+            sudo docker run -d -p 80:80 --name web \
+              ${{ secrets.DOCKER_USER }}/${{ env.IMAGE_NAME }}
